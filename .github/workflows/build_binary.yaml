@@ -18,19 +18,32 @@ jobs:
 
     - name: Homebrew環境のセットアップ
       run: |
-        # ffmpegとmpvのlgplタップを追加
         brew tap lgpl-dev/ffmpeg-lgpl
         brew tap lgpl-dev/mpv-lgpl
-        # 必要なパッケージをインストール
         brew install ffmpeg-lgpl mpv-lgpl python
-        # otoolやinstall_name_toolがパスにあるか確認
         which otool
         which install_name_tool
 
+    - name: スクリプトの実行パスを動的に取得
+      id: get_paths
+      run: |
+        MPV_BIN_PATH=$(brew --prefix mpv-lgpl)/bin/mpv
+        FFMPEG_LIB_PATH=$(brew --prefix ffmpeg-lgpl)/lib
+        MPV_LIB_PATH=$(brew --prefix mpv-lgpl)/lib
+        HOMEBREW_PREFIX=$(brew --prefix)
+
+        echo "MPV_BIN_PATH=$MPV_BIN_PATH" >> $GITHUB_ENV
+        echo "FFMPEG_LIB_PATH=$FFMPEG_LIB_PATH" >> $GITHUB_ENV
+        echo "MPV_LIB_PATH=$MPV_LIB_PATH" >> $GITHUB_ENV
+        echo "HOMEBREW_PREFIX=$HOMEBREW_PREFIX" >> $GITHUB_ENV
+        echo "::set-output name=homebrew_prefix::$HOMEBREW_PREFIX"
+
     - name: スクリプトの保存と実行
       id: run_script
+      env:
+        MPV_BIN_PATH: ${{ env.MPV_BIN_PATH }}
+        HOMEBREW_PREFIX: ${{ env.HOMEBREW_PREFIX }}
       run: |
-        # Pythonスクリプトをファイルとして保存
         cat << 'EOF' > build_mpv.py
         import subprocess
         import re
@@ -38,20 +51,14 @@ jobs:
         import shutil
 
         def get_linked_and_real_paths(filepaths, filter_prefixes):
-            """
-            指定されたファイルのdylib依存関係を再帰的に取得し、元のパスと実体のパスの
-            ユニークなマッピングを返します。
-            """
             path_map = {}
             processed_paths = set()
             to_process = list(filepaths)
-
             filter_pattern = '|'.join([re.escape(p) for p in filter_prefixes])
             filter_regex = re.compile(f'({filter_pattern})')
 
             while to_process:
                 current_file = to_process.pop(0)
-
                 if current_file in processed_paths:
                     continue
                 processed_paths.add(current_file)
@@ -71,11 +78,8 @@ jobs:
                     match = re.search(r'\s+([^\s]+)\s+\(compatibility version', line)
                     if match:
                         linked_dylib = match.group(1)
-                        
-                        # @rpath や @loader_path の依存関係も検出対象に含める
                         real_path = linked_dylib
                         if linked_dylib.startswith('@rpath/'):
-                            # @rpath を元のパスのプレフィックスに置き換えて実体パスを推測
                             guessed_path = linked_dylib.replace('@rpath', filter_prefixes[0])
                             real_path = os.path.realpath(guessed_path)
                         elif not os.path.isabs(linked_dylib):
@@ -89,9 +93,6 @@ jobs:
             return path_map
 
         def setup_directory_structure(root_dir="mpv"):
-            """
-            mpv/bin と mpv/lib のディレクトリ構造を作成します。
-            """
             print(f"ディレクトリ構造を作成中: {root_dir}")
             bin_path = os.path.join(os.getcwd(), root_dir, "bin")
             lib_path = os.path.join(os.getcwd(), root_dir, "lib")
@@ -100,22 +101,16 @@ jobs:
             return bin_path, lib_path
 
         def copy_files(path_map, lib_path):
-            """
-            dylibと実行可能ファイルをそれぞれのディレクトリにコピーします。
-            """
             print("必要なファイルをコピー中...")
             copied_map = {}
             for real_path, original_path in path_map.items():
                 try:
                     dest_filename = os.path.basename(real_path)
                     dest_path = os.path.join(lib_path, dest_filename)
-                    
                     if not os.path.exists(dest_path):
                         shutil.copy2(real_path, dest_path)
                         print(f"コピー: {real_path} -> {dest_path}")
-                    
                     copied_map[original_path] = dest_path
-
                 except FileNotFoundError:
                     print(f"警告: ファイルが見つかりません: {original_path}")
                 except Exception as e:
@@ -123,16 +118,9 @@ jobs:
             return copied_map
 
         def fix_paths_relative(executable_path, lib_path, copied_map):
-            """
-            すべてのファイルパスを相対パスに修正します。
-            """
             print("すべてのパスを相対パスに修正中...")
-            
-            # 実行可能ファイルのrpathを追加
             rpath_cmd = ["install_name_tool", "-add_rpath", "@loader_path/../lib", executable_path]
             subprocess.run(rpath_cmd, check=True)
-            
-            # 実行可能ファイルの依存パスを修正
             try:
                 otool_output = subprocess.run(['otool', '-L', executable_path], capture_output=True, text=True, check=True).stdout
                 for line in otool_output.splitlines():
@@ -147,16 +135,13 @@ jobs:
             except Exception as e:
                 print(f"エラー: 実行可能ファイルのパス修正中に問題が発生しました: {e}")
 
-            # dylibのIDと依存パスを修正
             for original_path, copied_path in copied_map.items():
                 try:
-                    # 自分のIDを修正
                     new_id = f"@loader_path/{os.path.basename(copied_path)}"
                     id_cmd = ["install_name_tool", "-id", new_id, copied_path]
                     subprocess.run(id_cmd, check=True)
                     print(f"ID変更: {os.path.basename(copied_path)} のIDを {new_id} に設定")
 
-                    # 依存するdylibのパスを修正
                     otool_output = subprocess.run(['otool', '-L', copied_path], capture_output=True, text=True, check=True).stdout
                     for line in otool_output.splitlines():
                         match = re.search(r'\s+([^\s]+)\s+\(compatibility version', line)
@@ -171,14 +156,10 @@ jobs:
                     print(f"エラー: {copied_path} のパス修正中に問題が発生しました: {e}")
 
         def re_codesign(root_dir="mpv"):
-            """
-            指定されたディレクトリ内のすべての実行可能ファイルとdylibに再署名します。
-            """
             print("すべてのファイルに再署名中...")
             bin_path = os.path.join(os.getcwd(), root_dir, "bin")
             lib_path = os.path.join(os.getcwd(), root_dir, "lib")
             
-            # libディレクトリ内のdylibに署名
             if os.path.exists(lib_path):
                 for filename in os.listdir(lib_path):
                     filepath = os.path.join(lib_path, filename)
@@ -190,7 +171,6 @@ jobs:
                         except subprocess.CalledProcessError as e:
                             print(f"警告: {filepath} の署名に失敗しました: {e}")
             
-            # binディレクトリ内の実行可能ファイルに署名
             if os.path.exists(bin_path):
                 for filename in os.listdir(bin_path):
                     filepath = os.path.join(bin_path, filename)
@@ -203,54 +183,44 @@ jobs:
                             print(f"警告: {filepath} の署名に失敗しました: {e}")
 
         if __name__ == "__main__":
-            # --- 設定 ---
-            target_executable = "/opt/homebrew/bin/mpv"
-            # 追加のシードとなるdylibリスト
+            target_executable = os.environ.get('MPV_BIN_PATH')
+            homebrew_prefix = os.environ.get('HOMEBREW_PREFIX')
+            
             extra_dylibs = [
-                "/opt/homebrew/lib/libass.dylib",
-                "/opt/homebrew/lib/libavcodec.dylib",
-                "/opt/homebrew/lib/libavdevice.dylib",
-                "/opt/homebrew/lib/libavfilter.dylib",
-                "/opt/homebrew/lib/libavformat.dylib",
-                "/opt/homebrew/lib/libavutil.dylib",
-                "/opt/homebrew/lib/libmpv.dylib",
-                "/opt/homebrew/lib/libplacebo.dylib",
-                "/opt/homebrew/lib/libswscale.dylib",
-                "/opt/homebrew/lib/libunibreak.dylib",
-                # エラーログから見つからなかったライブラリを追加
-                "/opt/homebrew/lib/libwebp.dylib",
-                "/opt/homebrew/lib/libjxl_cms.dylib",
-                "/opt/homebrew/lib/libsharpyuv.dylib"
+                f"{homebrew_prefix}/lib/libass.dylib",
+                f"{homebrew_prefix}/lib/libavcodec.dylib",
+                f"{homebrew_prefix}/lib/libavdevice.dylib",
+                f"{homebrew_prefix}/lib/libavfilter.dylib",
+                f"{homebrew_prefix}/lib/libavformat.dylib",
+                f"{homebrew_prefix}/lib/libavutil.dylib",
+                f"{homebrew_prefix}/lib/libmpv.dylib",
+                f"{homebrew_prefix}/lib/libplacebo.dylib",
+                f"{homebrew_prefix}/lib/libswscale.dylib",
+                f"{homebrew_prefix}/lib/libunibreak.dylib",
+                f"{homebrew_prefix}/lib/libwebp.dylib",
+                f"{homebrew_prefix}/lib/libjxl_cms.dylib",
+                f"{homebrew_prefix}/lib/libsharpyuv.dylib"
             ]
-            # 検索対象とするプレフィックス
             filter_prefixes = [
-                "/opt/homebrew",
-                "/Users/koba/Desktop/sinage/sample_mpv" # このパスはGitHub Actionsランナーでは存在しないため、除外しても良い
+                f"{homebrew_prefix}"
             ]
             root_dir = "mpv"
-            # -----------
             
-            # ステップ1: dylibの依存関係を再帰的に取得
             print("dylibの依存関係を再帰的に取得中...")
             seed_files = [target_executable] + extra_dylibs
             path_map = get_linked_and_real_paths(seed_files, filter_prefixes)
             
-            # ステップ2: ディレクトリ構造を作成
             bin_path, lib_path = setup_directory_structure(root_dir)
             
-            # ステップ3: mpv実行可能ファイルをコピー
             executable_name = os.path.basename(target_executable)
             dest_executable_path = os.path.join(bin_path, executable_name)
             shutil.copy2(target_executable, dest_executable_path)
             print(f"実行可能ファイルをコピー: {target_executable} -> {dest_executable_path}")
             
-            # ステップ4: dylibをコピー
             copied_map = copy_files(path_map, lib_path)
             
-            # ステップ5: すべてのパスを相対パスに修正
             fix_paths_relative(dest_executable_path, lib_path, copied_map)
             
-            # ステップ6: 再署名
             re_codesign(root_dir)
             
             print("\n--- 完了 ---")
@@ -258,7 +228,6 @@ jobs:
             print("これでmpv/bin/mpvから相対パスでdylibが参照されるようになります。")
         EOF
 
-        # スクリプトを実行
         python build_mpv.py
 
     - name: mpvディレクトリをtar.gzに圧縮
