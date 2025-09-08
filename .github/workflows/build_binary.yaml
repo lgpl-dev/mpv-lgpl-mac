@@ -229,7 +229,6 @@ jobs:
         files: mpv.tar.gz
         tag_name: ${{ github.event.inputs.version }}
         name: mpv ${{ github.event.inputs.version }}
-        draft: true
         prerelease: false
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
