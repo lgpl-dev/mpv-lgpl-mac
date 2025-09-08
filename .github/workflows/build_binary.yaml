@@ -11,6 +11,8 @@ on:
 jobs:
   build_and_release:
     runs-on: macos-13
+    permissions:
+      contents: write
     
     steps:
     - name: チェックアウト
@@ -28,15 +30,10 @@ jobs:
       id: get_paths
       run: |
         MPV_BIN_PATH=$(brew --prefix mpv-lgpl)/bin/mpv
-        FFMPEG_LIB_PATH=$(brew --prefix ffmpeg-lgpl)/lib
-        MPV_LIB_PATH=$(brew --prefix mpv-lgpl)/lib
         HOMEBREW_PREFIX=$(brew --prefix)
 
         echo "MPV_BIN_PATH=$MPV_BIN_PATH" >> $GITHUB_ENV
-        echo "FFMPEG_LIB_PATH=$FFMPEG_LIB_PATH" >> $GITHUB_ENV
-        echo "MPV_LIB_PATH=$MPV_LIB_PATH" >> $GITHUB_ENV
         echo "HOMEBREW_PREFIX=$HOMEBREW_PREFIX" >> $GITHUB_ENV
-        echo "::set-output name=homebrew_prefix::$HOMEBREW_PREFIX"
 
     - name: スクリプトの保存と実行
       id: run_script
